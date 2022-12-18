@@ -37,7 +37,7 @@ export const codeEvaluator = (): Extension => {
 //            from, to,
             enter: (node) => {
                 //if (node.name == "FencedCode") {
-                if (node.name == "HTMLBlock") {
+                if (node.name == "CodeBlock") {
                     //this is the content:
                     //Note - we visit this every change in the doc
                     //view.state.doc.sliceString(node.from, node.to+1)
