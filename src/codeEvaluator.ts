@@ -38,6 +38,7 @@ export const codeEvaluator = (): Extension => {
             enter: (node) => {
                 //if (node.name == "FencedCode") {
                 if (node.name == "CodeBlock") {
+                //if (node.name == "ReactiveCell") {
                     //this is the content:
                     //Note - we visit this every change in the doc
                     //view.state.doc.sliceString(node.from, node.to+1)
