@@ -2,11 +2,11 @@ import {syntaxTree} from "@codemirror/language"
 import {WidgetType, EditorView, Decoration, DecorationSet} from "@codemirror/view"
 
 
-import type { EditorState, Extension, Range } from '@codemirror/state'
+import type { EditorState, Extension, Range, Transaction, ChangeSet } from '@codemirror/state'
 import { RangeSet, StateField } from '@codemirror/state'
 
 
-class ResultCell extends WidgetType {
+class CellDisplay extends WidgetType {
     code: string
 
     constructor(code: string) { 
@@ -14,7 +14,7 @@ class ResultCell extends WidgetType {
         this.code = code
     }
 
-    eq(other: ResultCell) { return other.code == this.code }
+    eq(other: CellDisplay) { return other.code == this.code }
 
     toDOM() {
         let wrap = document.createElement("div")
@@ -28,48 +28,112 @@ class ResultCell extends WidgetType {
 }
 
 
+class CellInfo {
+    from: number
+    to: number
+    codeText: string
+
+    constructor(from: number,to: number,codeText: string) {
+        this.from = from
+        this.to = to
+        this.codeText = codeText
+    }
+}
+
+class CellState {
+    cells: CellInfo[] = []
+    decorations: RangeSet<Decoration>
+
+    constructor(cells: CellInfo[], decorations: RangeSet<Decoration>) {
+        this.cells = cells
+        this.decorations = decorations
+    }
+}
+
 export const codeEvaluator = (): Extension => {
 
-    const decorate = (state: EditorState) => {
+    const processUpdate = (cellState: CellState | null, editorState: EditorState, changes: ChangeSet | null) => {
         const widgets: Range<Decoration>[] = []
+        const cells: CellInfo[] = []
 
-        syntaxTree(state).iterate({
-//            from, to,
+        syntaxTree(editorState).iterate({
             enter: (node) => {
-                //if (node.name == "FencedCode") {
                 if (node.name == "CodeBlock") {
-                //if (node.name == "ReactiveCell") {
-                    //this is the content:
-                    //Note - we visit this every change in the doc
-                    //view.state.doc.sliceString(node.from, node.to+1)
-                    let deco = Decoration.widget({
-                        widget: new ResultCell(state.doc.sliceString(node.from, node.to+1)),
+
+                    //I want to do the following:
+                    // - if a change set and cell state is passed in, check if a cell
+                    // maps to a previous cell, and if so, does it need to be udpated
+                    // or just remapped
+                    // - delete cells that are deleted
+                    //I will use the change set and the old cell state
+
+
+                    let codeText = editorState.doc.sliceString(node.from, node.to+1)
+                    //I should annotate the name,assignOp,body within the code block
+
+                    let cellInfo: CellInfo | null = null
+                    cellInfo = new CellInfo(node.from,node.to,codeText)
+                    cells.push(cellInfo)
+
+                    let decoration = Decoration.widget({
+                        widget: new CellDisplay(codeText),
                         block: true,
                         side: 1
                     })
-                    widgets.push(deco.range(node.to))
+
+                    widgets.push(decoration.range(node.to))
+
+                    ///////////////////////////
+                    //type safety and remapping example
+                    if((cellState != null)&&(changes != null)) {
+                        let cells = cellState!.cells
+
+                        if(cells.length > 0) {
+                            let cell = cells[0]
+                            cell.from
+                            cell.to
+
+                            //get the new positions if we hav a cell we can remap - meaning no change to the cell
+                            let newFrom = changes!.mapPos(cell.from)
+                            let newTo = changes!.mapPos(cell.to)
+
+                            //remap the decoration 
+                            let oldDecoration = decoration  //this is just to get a decoration
+                            let newDecoration = oldDecoration.range(newTo)
+
+                            //cellState!.decorations.map(changes)  YES!
+
+                        }
+                    }
+                    ///////////////////////////
                 }  
             }
         } )
-        return widgets.length > 0 ? RangeSet.of(widgets) : Decoration.none
+        
+        let decorations = widgets.length > 0 ? RangeSet.of(widgets) : Decoration.none
+        return new CellState(cells,decorations)
     }
 
-    const resultCellField = StateField.define<DecorationSet>({
+    const CellField = StateField.define<CellState>({
         create(state) {
-            return decorate(state)
+            return processUpdate(null,state,null)
         },
-        update(resultCells, transaction) {
-            if (transaction.docChanged)
-                return decorate(transaction.state)
+        update(cellState, transaction) {
+            if (transaction.docChanged) {
+                return processUpdate(cellState,transaction.state,transaction.changes)
+            }
+            else {
+                //I need to process changes to the selection - to detect saves
 
-            return resultCells.map(transaction.changes)
+                return cellState
+            }
         },
         provide(field) {
-            return EditorView.decorations.from(field)
+            return EditorView.decorations.from(field,f => f.decorations)
         },
     })
 
     return [
-        resultCellField,
+        CellField,
     ]
 }
