@@ -15,9 +15,8 @@ export const reactiveCode = (): Extension => {
                 return processUpdate(transaction.state,cellState.cellInfos,transaction.changes)
             }
             else {
-                //I need to process changes to the selection - to detect saves
-
-                return cellState
+                //send commands to the model, if needed
+                return sendCommands(cellState,transaction.state)
             }
         },
         provide(cellState) {
@@ -36,19 +35,21 @@ export const reactiveCode = (): Extension => {
 
 class CellDisplay extends WidgetType {
     id: number
+    status: string
     code: string
 
-    constructor(id:number, code: string) { 
+    constructor(id:number, status: string, code: string) { 
         super() 
         this.id = id
+        this.status = status
         this.code = code
     }
 
-    eq(other: CellDisplay) { return (other.code == this.code)&&(other.id == this.id) }
+    eq(other: CellDisplay) { return (other.code == this.code)&&(other.id == this.id)&&(other.status == this.status) }
 
     toDOM() {
         let wrap = document.createElement("div")
-        wrap.style.backgroundColor = "cyan"
+        wrap.style.backgroundColor = this.status == "clean" ? "lightblue" : "beige"
         wrap.style.border = "1px solid black"
         wrap.innerHTML = this.id + ": " + this.code
         return wrap
@@ -60,46 +61,70 @@ class CellDisplay extends WidgetType {
 
 class CellInfo {
     readonly id: number
+    readonly status: string
     readonly from: number
     readonly to: number
-    readonly codeText: string
+    readonly docCode: string
+    readonly modelCode: string | null
     readonly decoration: Decoration
     readonly placedDecoration: Range<Decoration>
 
-    private constructor(id: number, from: number,to: number,codeText: string, decoration: Decoration, placedDecoration: Range<Decoration>) {
+    private constructor(id: number, status: string, from: number,to: number,
+            docCode: string, modelCode: string | null, 
+            decoration: Decoration, placedDecoration: Range<Decoration>) {
         this.id = id
+        this.status = status,
         this.from = from
         this.to = to
-        this.codeText = codeText
+        this.docCode = docCode
+        this.modelCode = modelCode
         this.decoration = decoration
         this.placedDecoration = placedDecoration
     }
 
-    static newCellInfo(from: number,to: number,codeText: string) {
+    static newCellInfo(from: number,to: number,docCode: string) {
         let id = CellInfo.getId()
+        let status = "dirty"
+        let modelCode = null
         let decoration = Decoration.widget({
-            widget: new CellDisplay(id,codeText),
+            widget: new CellDisplay(id,status,docCode),
             block: true,
             side: 1
         })
         let placedDecoration = decoration.range(to)
-        return new CellInfo(id,from,to,codeText,decoration,placedDecoration)
+        return new CellInfo(id,status,from,to,docCode,modelCode,decoration,placedDecoration)
     }
 
-    static updateCellInfo(cellInfo: CellInfo, from: number, to:number, codeText: string) {
+    static updateCellInfo(cellInfo: CellInfo, from: number, to:number, docCode: string) {
+        let status = "dirty"
         let decoration = Decoration.widget({
-            widget: new CellDisplay(cellInfo.id,codeText),
+            widget: new CellDisplay(cellInfo.id,status,cellInfo.modelCode !== null ? cellInfo.modelCode! : ""),
             block: true,
             side: 1
         })
         let placedDecoration = decoration.range(to)
-        return new CellInfo(cellInfo.id,from,to,codeText,decoration,placedDecoration)
+        return new CellInfo(cellInfo.id,status,from,to,docCode,cellInfo.modelCode,decoration,placedDecoration)
     }
 
     /** This function creates a rempped cell info, if only the position changes */
     static remapCellInfo(cellInfo: CellInfo, from: number,to: number) {
         let placedDecoration = cellInfo.decoration.range(to)
-        return new CellInfo(cellInfo.id,from,to,cellInfo.codeText,cellInfo.decoration,placedDecoration)
+        return new CellInfo(cellInfo.id,cellInfo.status,from,to,cellInfo.docCode,cellInfo.modelCode,cellInfo.decoration,placedDecoration)
+    }
+
+    static tempSendCommandFunction(cellInfo: CellInfo): CellInfo {
+        let status = "clean"
+        let modelCode = cellInfo.docCode
+        //no command for now, just change cell info
+        let decoration = Decoration.widget({
+            widget: new CellDisplay(cellInfo.id,status,modelCode),
+            block: true,
+            side: 1
+        })
+        let placedDecoration = decoration.range(cellInfo.to)
+        return new CellInfo(cellInfo.id,status,cellInfo.from,cellInfo.to,
+            cellInfo.docCode,modelCode,
+            decoration,  placedDecoration)
     }
 
     //for now we make a dummy id nere
@@ -112,6 +137,7 @@ class CellInfo {
 type CellState = {
     cellInfos: CellInfo[]
     decorations: RangeSet<Decoration>
+    dirtyCells: number[]
 }
 
 type CellUpdateInfo = {
@@ -146,7 +172,12 @@ function processUpdate(editorState: EditorState, cellInfoArray: CellInfo[] | nul
         previousCellsLink = getPreviousCellsLink(cellInfoArray!,changes!)
     }
 
-    return updateCellState(editorState, previousCellsLink)
+    let cellState = updateCellState(editorState, previousCellsLink)
+
+    //send commands to the model, if needed
+    cellState = sendCommands(cellState,editorState)
+
+    return cellState
 }
 
 //cycle through the old cell state
@@ -202,11 +233,19 @@ function deleteOldCell(cellInfo:CellInfo, cellsToDelete: CellInfo[]) {
 }
 
 function createCellState(cellInfos: CellInfo[]): CellState {
+    let dirtyCells: number[] = []
+    cellInfos.forEach( (cellInfo,index) => {
+        if(cellInfo.status == "dirty") {
+            dirtyCells.push(index)
+        }
+    })
+
     return {
         cellInfos: cellInfos,
         decorations: (cellInfos.length > 0) ? 
             RangeSet.of(cellInfos.map(cellInfo => cellInfo.placedDecoration)) : 
-            Decoration.none
+            Decoration.none,
+        dirtyCells: dirtyCells
     }
 }
 
@@ -221,6 +260,7 @@ function createCellState(cellInfos: CellInfo[]): CellState {
 function updateCellState(editorState: EditorState, previousCellsLink: PreviousCellsLink | null) { 
     const cellInfos: CellInfo[] = []
 
+    //get the updated code blocks
     syntaxTree(editorState).iterate({
         enter: (node) => {
             if (node.name == "CodeBlock") {
@@ -260,6 +300,43 @@ function updateCellState(editorState: EditorState, previousCellsLink: PreviousCe
         }
     })
 
+    //send delete commands here?
+
+    //maybe put update commands here, instead fo later
+
     return createCellState(cellInfos)
+}
+
+//change to sendUpdateCommands?
+function sendCommands(cellState: CellState, editorState: EditorState) {
+    let selectionHead = editorState.selection.asSingle().main.head
+    
+    let cellsToUpdate: number[] = []
+    if(cellState.dirtyCells.length > 0) {
+        cellState.dirtyCells.forEach(cellIndex => {
+            let cellInfo = cellState.cellInfos[cellIndex]
+            if( (cellInfo.from > selectionHead) || (cellInfo.to < selectionHead) ) {
+                cellsToUpdate.push(cellIndex)
+            }
+        })
+
+        if(cellsToUpdate.length > 0) {
+            let newCellInfos = cellState.cellInfos.map( (cellInfo,index) => {
+                if(cellsToUpdate.indexOf(index) >= 0) {
+                    //send command, return updated cell info
+                    return CellInfo.tempSendCommandFunction(cellInfo)
+                }
+                else {
+                    return cellInfo
+                }
+
+            })
+
+            //get the updated state
+            cellState = createCellState(newCellInfos)
+        }
+    }
+
+    return cellState
 }
 
