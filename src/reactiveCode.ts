@@ -3,22 +3,54 @@ import {WidgetType, EditorView, Decoration} from "@codemirror/view"
 import type { EditorState, Extension, Range, ChangeSet } from '@codemirror/state'
 import { RangeSet, StateField } from '@codemirror/state'
 
+/** This is the extension to interface with the reactive code model and display the output in the editor */
+export const reactiveCode = (): Extension => {
+
+    const ReactiveCodeField = StateField.define<CellState>({
+        create(editorState) {
+            return processUpdate(editorState)
+        },
+        update(cellState, transaction) {
+            if (transaction.docChanged) {
+                return processUpdate(transaction.state,cellState.cellInfos,transaction.changes)
+            }
+            else {
+                //I need to process changes to the selection - to detect saves
+
+                return cellState
+            }
+        },
+        provide(cellState) {
+            return EditorView.decorations.from(cellState, cellState => cellState.decorations)
+        },
+    })
+
+    return [
+        ReactiveCodeField,
+    ]
+}
+
+//===================================
+// Data Structures
+//===================================
 
 class CellDisplay extends WidgetType {
+    id: number
     code: string
 
-    constructor(code: string) { 
+    constructor(id:number, code: string) { 
         super() 
+        this.id = id
         this.code = code
     }
 
-    eq(other: CellDisplay) { return other.code == this.code }
+    eq(other: CellDisplay) { return (other.code == this.code)&&(other.id == this.id) }
 
     toDOM() {
         let wrap = document.createElement("div")
         wrap.style.backgroundColor = "cyan"
         wrap.style.border = "1px solid black"
-        wrap.innerHTML = this.code
+        wrap.innerHTML = this.id + ": " + this.code
         return wrap
     }
 
@@ -27,36 +59,69 @@ class CellDisplay extends WidgetType {
 
 
 class CellInfo {
+    readonly id: number
     readonly from: number
     readonly to: number
     readonly codeText: string
+    readonly decoration: Decoration
+    readonly placedDecoration: Range<Decoration>
 
-    constructor(from: number,to: number,codeText: string) {
+    private constructor(id: number, from: number,to: number,codeText: string, decoration: Decoration, placedDecoration: Range<Decoration>) {
+        this.id = id
         this.from = from
         this.to = to
         this.codeText = codeText
+        this.decoration = decoration
+        this.placedDecoration = placedDecoration
+    }
+
+    static newCellInfo(from: number,to: number,codeText: string) {
+        let id = CellInfo.getId()
+        let decoration = Decoration.widget({
+            widget: new CellDisplay(id,codeText),
+            block: true,
+            side: 1
+        })
+        let placedDecoration = decoration.range(to)
+        return new CellInfo(id,from,to,codeText,decoration,placedDecoration)
+    }
+
+    static updateCellInfo(cellInfo: CellInfo, from: number, to:number, codeText: string) {
+        let decoration = Decoration.widget({
+            widget: new CellDisplay(cellInfo.id,codeText),
+            block: true,
+            side: 1
+        })
+        let placedDecoration = decoration.range(to)
+        return new CellInfo(cellInfo.id,from,to,codeText,decoration,placedDecoration)
+    }
+
+    /** This function creates a rempped cell info, if only the position changes */
+    static remapCellInfo(cellInfo: CellInfo, from: number,to: number) {
+        let placedDecoration = cellInfo.decoration.range(to)
+        return new CellInfo(cellInfo.id,from,to,cellInfo.codeText,cellInfo.decoration,placedDecoration)
+    }
+
+    //for now we make a dummy id nere
+    private static nextId = 1
+    private static getId() {
+        return CellInfo.nextId++
     }
 }
 
-class CellState {
-    readonly cells: CellInfo[] = []
-    readonly decorationSet: RangeSet<Decoration>
-
-    constructor(cells: CellInfo[], decorationSet: RangeSet<Decoration>) {
-        this.cells = cells
-        this.decorationSet = decorationSet
-    }
+type CellState = {
+    cellInfos: CellInfo[]
+    decorations: RangeSet<Decoration>
 }
 
 type CellUpdateInfo = {
     cellInfo: CellInfo
     changed: boolean
     newStart: number
-    newEnd?: number //don't record the new end if theobject was changed. We might not know it.
 }
 
-class CellTransitionInfo {
-    readonly cellMap: Record<number,CellUpdateInfo> = {}
+class PreviousCellsLink {
+    readonly cellMap: Record<number,CellUpdateInfo> = {}  //this is mapping to CellUpdateInfo with key = location in _new_ document
     readonly cellsToDelete: CellInfo[] = []
 
     constructor(cellMap: Record<number,CellUpdateInfo>,cellsToDelete: CellInfo[]) {
@@ -64,36 +129,85 @@ class CellTransitionInfo {
         this.cellsToDelete = cellsToDelete
     }
 
-    getCellUpdateInfo(from: number): CellUpdateInfo | undefined {
-        return this.cellMap[from]
+    /** This looks for cell update info corresponding to position "fromPos" in the new document */
+    getCellUpdateInfo(fromPos: number): CellUpdateInfo | undefined {
+        return this.cellMap[fromPos]
     }
 }
 
+//===================================
+// Internal Functions
+//===================================
+
 /** This method processes a new or updated editor state */
-function processUpdate(editorState: EditorState, cellState: CellState | null, changes: ChangeSet | null): CellState {
-    let cellTransInfo: CellTransitionInfo | null = null
-    if((cellState !== null)&&(changes !== null)) {
-        cellTransInfo = getCellTransitionInfo(cellState!,changes!)
+function processUpdate(editorState: EditorState, cellInfoArray: CellInfo[] | null = null, changes: ChangeSet | null = null) {
+    let previousCellsLink: PreviousCellsLink | null = null
+    if((cellInfoArray !== null)&&(changes !== null)) {
+        previousCellsLink = getPreviousCellsLink(cellInfoArray!,changes!)
     }
 
-    return updateCellState(editorState, cellTransInfo)
+    return updateCellState(editorState, previousCellsLink)
 }
 
 //cycle through the old cell state
 // - for cells with no changes - they will be remapped
 // - for cells with changes starting after beginning and ending before or after end - they will be updated
 // - for cells with changed starting before beginning and ending before or after the end - they will be deleted
-function getCellTransitionInfo(cellState: CellState, changes: ChangeSet): CellTransitionInfo {
-    return new CellTransitionInfo({},[])
+function getPreviousCellsLink(cellInfoArray: CellInfo[], changes: ChangeSet) {
+
+    let cellMap: Record<number,CellUpdateInfo> = {}
+    let cellsToDelete: CellInfo[] = []
+
+    //see how a cell changes
+    cellInfoArray.forEach( (cellInfo) => {
+        changes.iterChangedRanges((fromOld,toOld,fromNew,toNew) => {
+            if(fromOld < cellInfo.from) {
+                if(toOld < cellInfo.from) {
+                    //before the start of this cell - no info yet
+                    return
+                }
+                else {
+                    //overlaps cell start and maybe the end - delete this cell
+                    deleteOldCell(cellInfo,cellsToDelete)
+                    return
+
+                }
+            }
+            else if(fromOld <= cellInfo.to) {
+                //change starts in cell, ends inside or after - update cell
+                updateOldCell(cellInfo,true,cellMap,changes)
+                return
+            }
+            else {
+                //beyond the end of this cell - just remap the cell
+                updateOldCell(cellInfo,false,cellMap,changes)
+                return
+            }
+        })
+    })
+    
+    return new PreviousCellsLink(cellMap,cellsToDelete)
 }
 
-/** This function create a new cell display decoration object. */
-function createCellDisplayObject(codeText: string, pos: number): Range<Decoration> {
-    return Decoration.widget({
-        widget: new CellDisplay(codeText),
-        block: true,
-        side: 1
-    }).range(pos)
+/** This function loads the cell transition info for a cell that either has been
+ * updated or has not changed */
+function updateOldCell(cellInfo:CellInfo, changed: boolean, cellMap: Record<number,CellUpdateInfo>, changes: ChangeSet) {
+    let newFrom = changes.mapPos(cellInfo.from)
+    cellMap[newFrom] = {cellInfo: cellInfo, changed: changed, newStart: newFrom}
+}
+
+/** This function loads the cell transition info for a cell that will be deleted. */
+function deleteOldCell(cellInfo:CellInfo, cellsToDelete: CellInfo[]) {
+    cellsToDelete.push(cellInfo)
+}
+
+function createCellState(cellInfos: CellInfo[]): CellState {
+    return {
+        cellInfos: cellInfos,
+        decorations: (cellInfos.length > 0) ? 
+            RangeSet.of(cellInfos.map(cellInfo => cellInfo.placedDecoration)) : 
+            Decoration.none
+    }
 }
 
 //cycle through the new syntax tree, processing each code block:
@@ -104,9 +218,8 @@ function createCellDisplayObject(codeText: string, pos: number): Range<Decoratio
 //   - fpr cells not found in the transition info
 //     - create new decdoration and cell info (with a hook to send create command)
 // - leave a hook to send delete commands for cells that should be deleted
-function updateCellState(editorState: EditorState, cellTransInfo: CellTransitionInfo | null) { 
-    const widgets: Range<Decoration>[] = []
-    const cells: CellInfo[] = []
+function updateCellState(editorState: EditorState, previousCellsLink: PreviousCellsLink | null) { 
+    const cellInfos: CellInfo[] = []
 
     syntaxTree(editorState).iterate({
         enter: (node) => {
@@ -118,102 +231,35 @@ function updateCellState(editorState: EditorState, cellTransInfo: CellTransition
                 //I should annotate the name,assignOp,body within the code block
 
                 let newCellInfo: CellInfo | null = null
-                let newDecoObj: Range<Decoration> | null = null
 
                 //try to look up if this is an existing cell
                 let cellUpdateInfo: CellUpdateInfo | undefined = undefined
-                if(cellTransInfo !== null) {
-                    cellUpdateInfo = cellTransInfo.getCellUpdateInfo(fromPos)
+                if(previousCellsLink !== null) {
+                    cellUpdateInfo = previousCellsLink.getCellUpdateInfo(fromPos)
                 }
 
                 if(cellUpdateInfo !== undefined) {
+                    let oldCellInfo = cellUpdateInfo!.cellInfo
+
                     if(cellUpdateInfo!.changed) {
                         //update to a cell
-                        //let oldCellInfo = cellUpdateInfo!.cellInfo
-                        
-                        //for now just create from scratch
-                        newCellInfo = new CellInfo(fromPos,toPos,codeText)
-                        newDecoObj = createCellDisplayObject(codeText,toPos)
+                        newCellInfo = CellInfo.updateCellInfo(oldCellInfo,fromPos,toPos,codeText)
                     }
                     else {
-                        //no change to a cell
-                        //let oldCellInfo = cellUpdateInfo!.cellInfo
-                        //do I want to verify the code text did not change?
-
-                        //for now just create from scratch
-                        newCellInfo = new CellInfo(fromPos,toPos,codeText)
-                        newDecoObj = createCellDisplayObject(codeText,toPos)
+                        //no change to a cell - just remap
+                        newCellInfo = CellInfo.remapCellInfo(oldCellInfo,fromPos,toPos)
                     }
                 }
                 else {
                     //create new objects
-                    newCellInfo = new CellInfo(fromPos,toPos,codeText)
-                    newDecoObj = createCellDisplayObject(codeText,toPos)
+                    newCellInfo = CellInfo.newCellInfo(fromPos,toPos,codeText)
                 }
 
-                cells.push(newCellInfo!)
-                widgets.push(newDecoObj!)
+                cellInfos.push(newCellInfo!)
             }
         }
     })
 
-    let decorationSet = widgets.length > 0 ? RangeSet.of(widgets) : Decoration.none
-    return new CellState(cells,decorationSet)
-}
-    
-
-/** This is the extension to interface with the reactive model and display the output in the editor */
-export const reactiveCode = (): Extension => {
-
-    const ReactiveCodeField = StateField.define<CellState>({
-        create(editorState) {
-            return processUpdate(editorState,null,null)
-        },
-        update(cellState, transaction) {
-            if (transaction.docChanged) {
-                return processUpdate(transaction.state,cellState,transaction.changes)
-            }
-            else {
-                //I need to process changes to the selection - to detect saves
-
-                return cellState
-            }
-        },
-        provide(cellState) {
-            return EditorView.decorations.from(cellState,cellState => cellState.decorationSet)
-        },
-    })
-
-    return [
-        ReactiveCodeField,
-    ]
+    return createCellState(cellInfos)
 }
 
-
-
-    //             ///////////////////////////
-    //             //type safety and remapping example
-    //             if((cellState != null)&&(changes != null)) {
-    //                 let cells = cellState!.cells
-
-    //                 if(cells.length > 0) {
-    //                     let cell = cells[0]
-    //                     cell.from
-    //                     cell.to
-
-    //                     //get the new positions if we hav a cell we can remap - meaning no change to the cell
-    //                     let newFrom = changes!.mapPos(cell.from)
-    //                     let newTo = changes!.mapPos(cell.to)
-
-    //                     //remap the decoration 
-    //                     let oldDecoration = decoration  //this is just to get a decoration
-    //                     let newDecoration = oldDecoration.range(newTo)
-
-    //                     //cellState!.decorations.map(changes)  YES!
-
-    //                 }
-    //             }
-    //             ///////////////////////////
-    //         }  
-    //     }
-    // } )
