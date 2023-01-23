@@ -103,6 +103,11 @@ export const images = (): Extension => {
         syntaxTree(state).iterate({
 //            from, to,
             enter: (node) => {
+                console.log("---------------------")
+                console.log(node.name)
+                console.log(node.type)
+                console.log(state.doc.sliceString(node.from, node.to + 1))
+
 /*
                 if (node.name == "BooleanLiteral") {
                     let isTrue = view.state.doc.sliceString(node.from, node.to) == "true"

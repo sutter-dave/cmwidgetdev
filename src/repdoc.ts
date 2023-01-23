@@ -4,7 +4,7 @@ import type { EditorState, Extension, Range, ChangeSet } from '@codemirror/state
 import { RangeSet, StateField } from '@codemirror/state'
 
 /** This is the extension to interface with the reactive code model and display the output in the editor */
-export const reactiveCode = (): Extension => {
+export const repdoc = (): Extension => {
 
     const ReactiveCodeField = StateField.define<CellState>({
         create(editorState) {
