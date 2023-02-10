@@ -11,12 +11,19 @@ export const images = (): Extension => {
     const decorate = (state: EditorState) => {
         const widgets: Range<Decoration>[] = []
 
+        console.log("---------------------")
+        let stack: number[] = []
+        let prevTo = 0
         syntaxTree(state).iterate({
             enter: (node) => {
-                console.log("---------------------")
-                console.log(node.name)
-                console.log(`from ${node.from} to ${node.to}`)
-                console.log(state.doc.sliceString(node.from, node.to))
+                let inBetween = state.doc.sliceString(prevTo, node.from)
+                 if(inBetween.indexOf("\n") >= 0) console.log("NEWLINE")
+                prevTo = node.to
+
+                while(stack.length > 0 && stack[stack.length - 1] < node.from) stack.pop()
+                let indent = "   ".repeat(stack.length)
+                stack.push(node.to)
+                console.log(`${indent}${node.name} from ${node.from} to ${node.to}`)
             }
         })
 
