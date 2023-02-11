@@ -20,7 +20,7 @@ export const images = (): Extension => {
                  if(inBetween.indexOf("\n") >= 0) console.log("NEWLINE")
                 prevTo = node.to
 
-                while(stack.length > 0 && stack[stack.length - 1] < node.from) stack.pop()
+                while(stack.length > 0 && stack[stack.length - 1] <= node.from) stack.pop()
                 let indent = "   ".repeat(stack.length)
                 stack.push(node.to)
                 console.log(`${indent}${node.name} from ${node.from} to ${node.to}`)
